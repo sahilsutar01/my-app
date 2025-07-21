@@ -1,259 +1,179 @@
 import React, { useState } from "react";
-import { ethers } from "ethers";
-
-const RPC_URL = "https://bsc-testnet-dataseed.bnbchain.org";
-const USDT_CONTRACT_ADDRESS = "0x787A697324dbA4AB965C58CD33c13ff5eeA6295F";
-const ERC20_ABI = [
-  "function balanceOf(address owner) view returns (uint256)",
-  "function transfer(address to, uint256 amount) returns (bool)",
-  "function decimals() view returns (uint8)",
-];
+import axios from "axios";
 
 function App() {
+  const [name, setName] = useState("");
   const [walletData, setWalletData] = useState(null);
-  const [walletName, setWalletName] = useState("");
-  const [searchName, setSearchName] = useState("");
   const [recipient, setRecipient] = useState("");
   const [amount, setAmount] = useState("");
-  const [balance, setBalance] = useState(null);
-  const [usdtBalance, setUsdtBalance] = useState(null);
-  const [loadingBNB, setLoadingBNB] = useState(false);
-  const [loadingUSDT, setLoadingUSDT] = useState(false);
+  const [token, setToken] = useState("bnb");
+  const [txHash, setTxHash] = useState("");
+  const [verifyData, setVerifyData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [balances, setBalances] = useState(null);
 
-  const provider = new ethers.providers.JsonRpcProvider(RPC_URL);
-
-  const styles = {
-    container: {
-      fontFamily: "'Segoe UI', sans-serif",
-      background: "#f0f4f8",
-      minHeight: "100vh",
-      padding: "40px 20px",
-      color: "#1f2937",
-      maxWidth: "750px",
-      margin: "auto",
-    },
-    section: {
-      background: "#ffffff",
-      padding: "24px",
-      borderRadius: "12px",
-      boxShadow: "0 4px 12px rgba(0, 0, 0, 0.05)",
-      marginBottom: "24px",
-    },
-    heading: {
-      fontSize: "28px",
-      marginBottom: "20px",
-      color: "#111827",
-    },
-    label: {
-      fontWeight: "500",
-      marginBottom: "6px",
-      display: "block",
-    },
-    input: {
-      width: "100%",
-      padding: "10px 12px",
-      fontSize: "15px",
-      marginBottom: "16px",
-      borderRadius: "8px",
-      border: "1px solid #d1d5db",
-      backgroundColor: "#f9fafb",
-    },
-    button: {
-      padding: "10px 20px",
-      backgroundColor: "#2563eb",
-      color: "white",
-      border: "none",
-      borderRadius: "8px",
-      fontSize: "15px",
-      cursor: "pointer",
-      marginRight: "10px",
-    },
-    detail: {
-      background: "#f9fafb",
-      padding: "10px",
-      borderRadius: "8px",
-      marginBottom: "12px",
-      fontSize: "15px",
-    },
-    smallTitle: {
-      fontSize: "18px",
-      marginTop: "20px",
-      marginBottom: "12px",
-      color: "#374151",
-    },
+  const createWallet = async () => {
+    try {
+      setLoading(true);
+      const res = await axios.post("http://localhost:5000/api/create", { name });
+      setWalletData(res.data);
+      alert("✅ Wallet Created");
+    } catch (err) {
+      alert("❌ Error creating wallet");
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const generateAndSaveWallet = async () => {
-    if (!walletName.trim()) return alert("Please enter a name for the wallet.");
-
-    const wallet = ethers.Wallet.createRandom();
-    const newWallet = {
-      name: walletName,
-      address: wallet.address,
-      privateKey: wallet.privateKey,
-      mnemonic: wallet.mnemonic.phrase,
-    };
-
+  const fetchWallet = async () => {
     try {
-      const res = await fetch("http://localhost:5000/api/wallet", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(newWallet),
+      setLoading(true);
+      const res = await axios.get(`http://localhost:5000/api/fetch/${name}`);
+      setWalletData(res.data);
+
+      const balRes = await axios.post("http://localhost:5000/api/balance", {
+        address: res.data.address,
       });
-
-      res.ok ? alert("✅ Wallet saved!") : alert("❌ Failed to save wallet.");
-      setWalletName("");
-    } catch {
-      alert("❌ Something went wrong.");
+      setBalances(balRes.data);
+    } catch (err) {
+      alert("❌ Wallet not found or error fetching balance");
+      console.error(err);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const fetchWalletByName = async () => {
-    if (!searchName.trim()) return alert("Please enter a wallet name.");
-
+  const sendTokens = async () => {
     try {
-      const res = await fetch(`http://localhost:5000/api/wallet/${searchName}`);
-      const data = await res.json();
-
-      if (data.error) {
-        alert("❌ Wallet not found.");
-        setWalletData(null);
-        setBalance(null);
-        setUsdtBalance(null);
-      } else {
-        setWalletData(data);
-        fetchBalance(data.privateKey);
-        getUSDTBalance(data.address);
-      }
-    } catch {
-      alert("❌ Error fetching wallet.");
-    }
-  };
-
-  const fetchBalance = async (privateKey) => {
-    const wallet = new ethers.Wallet(privateKey, provider);
-    const bal = await provider.getBalance(wallet.address);
-    setBalance(ethers.utils.formatEther(bal));
-  };
-
-  const getUSDTBalance = async (address) => {
-    const usdt = new ethers.Contract(USDT_CONTRACT_ADDRESS, ERC20_ABI, provider);
-    const rawBalance = await usdt.balanceOf(address);
-    const decimals = await usdt.decimals();
-    setUsdtBalance((Number(rawBalance) / 10 ** decimals).toFixed(4));
-  };
-
-  const sendBNB = async () => {
-    if (!walletData?.privateKey) return alert("Please load a wallet.");
-    if (!ethers.utils.isAddress(recipient)) return alert("Invalid address.");
-    if (!amount || isNaN(amount)) return alert("Invalid amount.");
-
-    try {
-      setLoadingBNB(true);
-      const wallet = new ethers.Wallet(walletData.privateKey, provider);
-      const tx = await wallet.sendTransaction({
+      if (!walletData?.privateKey) return alert("❌ Wallet not loaded");
+      setLoading(true);
+      const res = await axios.post("http://localhost:5000/api/send", {
+        privateKey: walletData.privateKey,
         to: recipient,
-        value: ethers.utils.parseEther(amount),
+        amount,
+        token,
       });
-      await tx.wait();
-      alert(`✅ BNB sent!\nHash: ${tx.hash}`);
-      fetchBalance(walletData.privateKey);
-      setAmount("");
-    } catch {
-      alert("❌ BNB transfer failed.");
+      setTxHash(res.data.txHash);
+      alert(`✅ Sent! TX Hash:\n${res.data.txHash}`);
+    } catch (err) {
+      alert("❌ Error sending tokens");
+      console.error(err);
     } finally {
-      setLoadingBNB(false);
+      setLoading(false);
     }
   };
 
-  const transferUSDT = async () => {
-    if (!walletData?.privateKey) return alert("Please load a wallet.");
-    if (!ethers.utils.isAddress(recipient)) return alert("Invalid address.");
-    if (!amount || isNaN(amount)) return alert("Invalid amount.");
-
+  const verifyTx = async () => {
     try {
-      setLoadingUSDT(true);
-      const wallet = new ethers.Wallet(walletData.privateKey, provider);
-      const usdt = new ethers.Contract(USDT_CONTRACT_ADDRESS, ERC20_ABI, wallet);
-      const decimals = await usdt.decimals();
-      const parsed = ethers.utils.parseUnits(amount, decimals);
-      const tx = await usdt.transfer(recipient, parsed);
-      await tx.wait();
-      alert("✅ USDT sent!");
-      getUSDTBalance(wallet.address);
-      setAmount("");
-    } catch {
-      alert("❌ USDT transfer failed.");
+      setLoading(true);
+      const res = await axios.post("http://localhost:5000/api/verify", { txHash });
+      setVerifyData(res.data);
+    } catch (err) {
+      alert("❌ Invalid TX hash");
+      console.error(err);
     } finally {
-      setLoadingUSDT(false);
+      setLoading(false);
     }
   };
 
   return (
-    <div style={styles.container}>
-      <h1 style={styles.heading}> Wallet Manager</h1>
+    <div style={{ padding: 20, fontFamily: "Arial", maxWidth: 800, margin: "auto" }}>
+      <h2>🧠 Wallet Manager</h2>
 
-      <div style={styles.section}>
-        <label style={styles.label}>Create New Wallet</label>
+      <div style={{ marginBottom: 10 }}>
         <input
-          style={styles.input}
-          placeholder="Enter wallet name"
-          value={walletName}
-          onChange={(e) => setWalletName(e.target.value)}
+          placeholder="Enter Name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          style={{ marginRight: 10, padding: 5 }}
         />
-        <button style={styles.button} onClick={generateAndSaveWallet}>Generate & Save</button>
-      </div>
-
-      <div style={styles.section}>
-        <label style={styles.label}>Fetch Existing Wallet</label>
-        <input
-          style={styles.input}
-          placeholder="Enter wallet name to fetch"
-          value={searchName}
-          onChange={(e) => setSearchName(e.target.value)}
-        />
-        <button style={styles.button} onClick={fetchWalletByName}>Fetch Wallet</button>
+        <button onClick={createWallet} disabled={loading}>Create Wallet</button>
+        <button onClick={fetchWallet} disabled={loading} style={{ marginLeft: 5 }}>
+          Fetch Wallet
+        </button>
       </div>
 
       {walletData && (
-        <div style={styles.section}>
-          <h3 style={styles.smallTitle}>🔐 Wallet Info</h3>
-          <div style={styles.detail}><strong>Name:</strong> {walletData.name}</div>
-          <div style={styles.detail}><strong>Address:</strong> {walletData.address}</div>
-          <div style={styles.detail}><strong>Private Key:</strong> {walletData.privateKey}</div>
-          <div style={styles.detail}><strong>Mnemonic:</strong> {walletData.mnemonic}</div>
-          <div style={styles.detail}><strong>BNB Balance:</strong> {balance ?? "..."} BNB</div>
-          <div style={styles.detail}><strong>USDT Balance:</strong> {usdtBalance ?? "..."} USDT</div>
+        <div style={{ background: "#f0f0f0", padding: 10, borderRadius: 8 }}>
+          <p><strong>Address:</strong> {walletData.address}</p>
+          <p><strong>Private Key:</strong> {walletData.privateKey}</p>
+          <p><strong>Mnemonic:</strong> {walletData.mnemonic}</p>
 
-          <h4 style={styles.smallTitle}>📤 Send Tokens</h4>
-          <input
-            style={styles.input}
-            placeholder="Recipient Address"
-            value={recipient}
-            onChange={(e) => setRecipient(e.target.value)}
-          />
-          <input
-            style={styles.input}
-            placeholder="Amount"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-          />
-          <button
-            style={styles.button}
-            onClick={sendBNB}
-            disabled={loadingBNB}
-          >
-            {loadingBNB ? "Sending BNB..." : "Send BNB"}
-          </button>
-          <button
-            style={styles.button}
-            onClick={transferUSDT}
-            disabled={loadingUSDT}
-          >
-            {loadingUSDT ? "Sending USDT..." : "Send USDT"}
-          </button>
+          {balances && (
+            <div style={{ marginTop: 10 }}>
+              <p><strong>BNB:</strong> {balances.bnb}</p>
+              <p><strong>USDT:</strong> {balances.usdt}</p>
+              <p><strong>USDC:</strong> {balances.usdc}</p>
+            </div>
+          )}
         </div>
       )}
+
+      <hr />
+
+      <h3>💸 Send Tokens</h3>
+      <div style={{ marginBottom: 10 }}>
+        <input
+          placeholder="Recipient Address"
+          value={recipient}
+          onChange={(e) => setRecipient(e.target.value)}
+          style={{ padding: 5, width: "60%" }}
+        />
+      </div>
+      <div style={{ marginBottom: 10 }}>
+        <input
+          placeholder="Amount"
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          style={{ padding: 5 }}
+        />
+        <select
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          style={{ padding: 5, marginLeft: 10 }}
+        >
+          <option value="bnb">BNB</option>
+          <option value="usdt">USDT</option>
+          <option value="usdc">USDC</option>
+        </select>
+        <button onClick={sendTokens} disabled={loading} style={{ marginLeft: 10 }}>
+          Send
+        </button>
+      </div>
+
+      {txHash && (
+        <div style={{ background: "#f9f9f9", padding: 10, borderRadius: 8 }}>
+          <p><strong>TX Hash:</strong> {txHash}</p>
+        </div>
+      )}
+
+      <hr />
+
+      <h3>🔍 Verify Transaction</h3>
+      <div style={{ marginBottom: 10 }}>
+        <input
+          placeholder="Transaction Hash"
+          value={txHash}
+          onChange={(e) => setTxHash(e.target.value)}
+          style={{ padding: 5, width: "60%" }}
+        />
+        <button onClick={verifyTx} disabled={loading} style={{ marginLeft: 10 }}>
+          Verify
+        </button>
+      </div>
+
+      {verifyData && (
+        <div style={{ background: "#e8f4ea", padding: 10, borderRadius: 8 }}>
+          <p><strong>From:</strong> {verifyData.from}</p>
+          <p><strong>To:</strong> {verifyData.to}</p>
+          <p><strong>Amount:</strong> {verifyData.value}</p>
+          <p><strong>Token:</strong> {verifyData.token}</p>
+          <p><strong>Status:</strong> {verifyData.status}</p>
+        </div>
+      )}
+
+      {loading && <p>⏳ Please wait...</p>}
     </div>
   );
 }
