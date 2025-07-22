@@ -117,6 +117,8 @@ app.post("/api/send", async (req, res) => {
 });
 
 // API: Verify Transaction
+
+
 app.post("/api/verify", async (req, res) => {
   try {
     const { txHash } = req.body;
@@ -129,13 +131,20 @@ app.post("/api/verify", async (req, res) => {
 
     if (tx.data && tx.data.startsWith("0xa9059cbb")) {
       const tokenAddress = tx.to.toLowerCase();
-      const decimals = tokenAddress === USDT_ADDRESS.toLowerCase() ? 6 : 18;
+
+      // Create contract instance to get decimals dynamically
+      const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
+      const decimals = await tokenContract.decimals();
+
+      const decoded = ethers.utils.defaultAbiCoder.decode(
+        ["address", "uint256"],
+        `0x${tx.data.slice(10)}`
+      );
+      value = ethers.utils.formatUnits(decoded[1], decimals);
 
       if (tokenAddress === USDT_ADDRESS.toLowerCase()) token = "usdt";
       else if (tokenAddress === USDC_ADDRESS.toLowerCase()) token = "usdc";
-
-      const decoded = ethers.utils.defaultAbiCoder.decode(["address", "uint256"], `0x${tx.data.slice(10)}`);
-      value = ethers.utils.formatUnits(decoded[1], decimals);
+      else token = "erc20";
     }
 
     res.json({
@@ -146,6 +155,7 @@ app.post("/api/verify", async (req, res) => {
       status: receipt.status === 1 ? "Success" : "Failed",
     });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
