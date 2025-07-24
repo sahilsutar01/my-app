@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import axios from "axios";
 import { QRCodeCanvas } from "qrcode.react";
 
@@ -12,7 +12,10 @@ function App() {
   const [verifyData, setVerifyData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [balances, setBalances] = useState(null);
-  const [showQRCode, setShowQRCode] = useState(false); // 👈 New state
+  const [showQRCode, setShowQRCode] = useState(false);
+  const [transactionHistory, setTransactionHistory] = useState([]);
+  const [showHistory, setShowHistory] = useState(false);
+
 
   const createWallet = async () => {
     try {
@@ -21,7 +24,7 @@ function App() {
       setWalletData(res.data);
       alert("✅ Wallet Created");
     } catch (err) {
-      alert("❌ Error creating wallet");
+      alert(`❌ Error creating wallet: ${err.response?.data?.error || err.message}`);
       console.error(err);
     } finally {
       setLoading(false);
@@ -31,7 +34,10 @@ function App() {
   const fetchWallet = async () => {
     try {
       setLoading(true);
-      setShowQRCode(false); // 👈 Reset QR view on new fetch
+      setShowQRCode(false);
+      setShowHistory(false);
+      setTransactionHistory([]);
+
       const res = await axios.get(`http://localhost:5000/api/fetch/${name}`);
       setWalletData(res.data);
 
@@ -40,7 +46,7 @@ function App() {
       });
       setBalances(balRes.data);
     } catch (err) {
-      alert("❌ Wallet not found or error fetching balance");
+      alert(`❌ Wallet not found or error fetching balance: ${err.response?.data?.error || err.message}`);
       console.error(err);
     } finally {
       setLoading(false);
@@ -59,8 +65,11 @@ function App() {
       });
       setTxHash(res.data.txHash);
       alert(`✅ Sent! TX Hash:\n${res.data.txHash}`);
+      if (showHistory) {
+        fetchHistory(walletData.address);
+      }
     } catch (err) {
-      alert("❌ Error sending tokens");
+      alert(`❌ Error sending tokens: ${err.response?.data?.error || err.message}`);
       console.error(err);
     } finally {
       setLoading(false);
@@ -72,8 +81,25 @@ function App() {
       setLoading(true);
       const res = await axios.post("http://localhost:5000/api/verify", { txHash });
       setVerifyData(res.data);
+      if (showHistory) {
+        fetchHistory(walletData.address);
+      }
     } catch (err) {
-      alert("❌ Invalid TX hash");
+      alert(`❌ Invalid TX hash: ${err.response?.data?.error || err.message}`);
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchHistory = async (address) => {
+    try {
+      setLoading(true);
+      const res = await axios.get(`http://localhost:5000/api/history/${address}`);
+      setTransactionHistory(res.data);
+      setShowHistory(true);
+    } catch (err) {
+      alert(`❌ Could not fetch transaction history: ${err.response?.data?.error || err.message}`);
       console.error(err);
     } finally {
       setLoading(false);
@@ -82,6 +108,14 @@ function App() {
 
   return (
     <div style={backgroundStyle}>
+      {loading && (
+        <div style={loaderOverlayStyle}>
+          <div style={spinnerContainerStyle}>
+            <div style={spinnerStyle}></div>
+            <p style={loadingTextStyle}>Processing...</p>
+          </div>
+        </div>
+      )}
       <div style={containerStyle}>
         <h2 style={titleStyle}>🧠 Wallet Manager</h2>
 
@@ -106,15 +140,22 @@ function App() {
             <p><strong>Private Key:</strong> {walletData.privateKey}</p>
             <p><strong>Mnemonic:</strong> {walletData.mnemonic}</p>
 
-            {/* 👇 Show QR Button */}
             <button
-              onClick={() => setShowQRCode(true)}
+              onClick={() => setShowQRCode(!showQRCode)}
               style={{ ...buttonStyle, marginTop: 10 }}
+              disabled={loading}
             >
-              Show QR Code
+              {showQRCode ? "Hide QR" : "Show QR"}
             </button>
 
-            {/* 👇 Conditionally Render QR */}
+            <button
+              onClick={() => showHistory ? setShowHistory(false) : fetchHistory(walletData.address)}
+              style={{ ...buttonStyle, marginTop: 10 }}
+              disabled={loading}
+            >
+              {showHistory ? "Hide History" : "Show History"}
+            </button>
+
             {showQRCode && (
               <div style={{ marginTop: 20, textAlign: "center" }}>
                 <QRCodeCanvas value={walletData.address} size={150} />
@@ -131,6 +172,37 @@ function App() {
             )}
           </div>
         )}
+
+        {showHistory && (
+          <>
+            <h3 style={sectionHeader}>📜 Transaction History</h3>
+            {transactionHistory.length > 0 ? (
+              transactionHistory.map((tx) => {
+                const isSent = tx.from.toLowerCase() === walletData.address.toLowerCase();
+                return (
+                  // ✅ FIX: Use tx._id for a guaranteed unique key
+                  <div key={tx._id} style={{...cardStyle, marginBottom: 15, background: isSent ? '#fff5f5' : '#f0fff4'}}>
+                     <p>
+                        <strong>{isSent ? "Sent to:" : "Received from:"}</strong> {isSent ? tx.to : tx.from}
+                     </p>
+                     <p><strong>Amount:</strong> {tx.value} {tx.token.toUpperCase()}</p>
+                     <p><strong>Status:</strong> {tx.status}</p>
+                     <p>
+                      <strong>Hash:</strong>{" "}
+                      <a href={`https://testnet.bscscan.com/tx/${tx.txHash}`} target="_blank" rel="noopener noreferrer" style={{ color: "#2563eb", textDecoration: "underline", wordBreak: 'break-all' }}>
+                        {tx.txHash.substring(0, 10)}...
+                      </a>
+                    </p>
+                    <p><strong>Date:</strong> {new Date(tx.createdAt).toLocaleString()}</p>
+                  </div>
+                )
+              })
+            ) : (
+              <p style={{textAlign: 'center', marginTop: '20px'}}>No transaction history found for this wallet.</p>
+            )}
+          </>
+        )}
+
 
         <h3 style={sectionHeader}>💸 Send Tokens</h3>
         <input
@@ -164,7 +236,7 @@ function App() {
         {txHash && (
           <div style={{ ...cardStyle, background: "#f0fff4" }}>
             <p>
-              <strong>TX Hash:</strong>{" "}
+              <strong>Last TX Hash:</strong>{" "}
               <a
                 href={`https://testnet.bscscan.com/tx/${txHash}`}
                 target="_blank"
@@ -199,82 +271,27 @@ function App() {
             <p><strong>Status:</strong> {verifyData.status}</p>
           </div>
         )}
-
-        {loading && <p style={{ textAlign: "center" }}>⏳ Please wait...</p>}
       </div>
     </div>
   );
 }
 
-// 🎨 Styles remain same
-const backgroundStyle = {
-  minHeight: "100vh",
-  padding: 30,
-  background: "linear-gradient(-45deg, #6ee7b7, #3b82f6, #9333ea, #f43f5e)",
-  backgroundSize: "400% 400%",
-  animation: "gradient 15s ease infinite",
-  fontFamily: "Poppins, sans-serif",
-};
-
-const containerStyle = {
-  maxWidth: 800,
-  margin: "auto",
-  padding: 30,
-  borderRadius: 20,
-  background: "rgba(255, 255, 255, 0.85)",
-  boxShadow: "0 8px 32px 0 rgba(31, 38, 135, 0.2)",
-  backdropFilter: "blur(8px)",
-  color: "#333",
-};
-
-const inputStyle = {
-  padding: 12,
-  borderRadius: 10,
-  border: "1px solid #ccc",
-  marginBottom: 10,
-  flex: 1,
-  fontSize: 14
-};
-
-const buttonStyle = {
-  background: "linear-gradient(90deg, #10b981, #06b6d4)",
-  color: "white",
-  padding: "10px 18px",
-  border: "none",
-  borderRadius: 10,
-  cursor: "pointer",
-  fontWeight: "bold",
-  transition: "all 0.3s",
-  marginLeft: 8,
-};
-
-const cardStyle = {
-  background: "#fefefe",
-  padding: 20,
-  borderRadius: 12,
-  marginTop: 20,
-  border: "1px solid #eee",
-  boxShadow: "0 2px 8px rgba(0,0,0,0.05)"
-};
-
-const flexRow = {
-  display: "flex",
-  gap: 10,
-  marginBottom: 15,
-  alignItems: "center"
-};
-
-const titleStyle = {
-  textAlign: "center",
-  fontSize: 28,
-  marginBottom: 25,
-  color: "#1f2937"
-};
-
-const sectionHeader = {
-  fontSize: 20,
-  marginTop: 30,
-  marginBottom: 10
-};
+// === Styles ===
+const backgroundStyle = { minHeight: "100vh", padding: 30, background: "linear-gradient(-45deg, #6ee7b7, #3b82f6, #9333ea, #f43f5e)", backgroundSize: "400% 400%", animation: "gradient 15s ease infinite", fontFamily: "Poppins, sans-serif", };
+const containerStyle = { maxWidth: 800, margin: "auto", padding: 30, borderRadius: 20, background: "rgba(255, 255, 255, 0.85)", boxShadow: "0 8px 32px 0 rgba(31, 38, 135, 0.2)", backdropFilter: "blur(8px)", color: "#333", };
+const inputStyle = { padding: 12, borderRadius: 10, border: "1px solid #ccc", marginBottom: 10, flex: 1, fontSize: 14, };
+const buttonStyle = { background: "linear-gradient(90deg, #10b981, #06b6d4)", color: "white", padding: "10px 18px", border: "none", borderRadius: 10, cursor: "pointer", fontWeight: "bold", transition: "all 0.3s", marginLeft: 8, };
+const cardStyle = { background: "#fefefe", padding: 20, borderRadius: 12, marginTop: 20, border: "1px solid #eee", boxShadow: "0 2px 8px rgba(0,0,0,0.05)", };
+const flexRow = { display: "flex", gap: 10, marginBottom: 15, alignItems: "center", };
+const titleStyle = { textAlign: "center", fontSize: 28, marginBottom: 25, color: "#1f2937", };
+const sectionHeader = { fontSize: 20, marginTop: 30, marginBottom: 10, };
+const loaderOverlayStyle = { position: "fixed", top: 0, left: 0, width: "100%", height: "100%", background: "rgba(255, 255, 255, 0.2)", backdropFilter: "blur(10px)", display: "flex", justifyContent: "center", alignItems: "center", zIndex: 9999, animation: "fadeIn 0.3s ease-in-out", };
+const spinnerContainerStyle = { textAlign: "center", transform: "scale(1)", animation: "zoomIn 0.3s ease-in-out", };
+const spinnerStyle = { width: 90, height: 90, borderRadius: "50%", border: "8px solid transparent", borderTop: "8px solid transparent", background: "conic-gradient(#3b82f6, #9333ea, #f43f5e, #10b981, #3b82f6)", animation: "spin 1s linear infinite, glow 1.5s ease-in-out infinite alternate", };
+const loadingTextStyle = { marginTop: 12, color: "#1f2937", fontWeight: "bold", fontSize: 16, };
+const styleSheet = document.createElement("style");
+styleSheet.type = "text/css";
+styleSheet.innerText = `@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } } @keyframes glow { 0% { filter: drop-shadow(0 0 5px #3b82f6); } 100% { filter: drop-shadow(0 0 20px #9333ea); } } @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } } @keyframes zoomIn { from { transform: scale(0.8); } to { transform: scale(1); } }`;
+document.head.appendChild(styleSheet);
 
 export default App;

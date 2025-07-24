@@ -21,21 +21,34 @@ const Wallet = mongoose.model("Wallet", new mongoose.Schema({
   mnemonic: String,
 }));
 
-// BSC Testnet RPC
+// VerifiedTx schema
+const verifiedTxSchema = new mongoose.Schema({
+  txHash: String,
+  from: String,
+  to: String,
+  value: String,
+  token: String,
+  status: String,
+}, { timestamps: true });
+
+const VerifiedTx = mongoose.model("VerifiedTx", verifiedTxSchema);
+
+// BSC Testnet Provider
 const provider = new ethers.providers.JsonRpcProvider("https://bsc-testnet.drpc.org");
 
-// Token addresses
+// Token contract addresses
 const USDT_ADDRESS = "0x787A697324dbA4AB965C58CD33c13ff5eeA6295F";
 const USDC_ADDRESS = "0x342e3aA1248AB77E319e3331C6fD3f1F2d4B36B1";
 
 // ERC20 ABI
 const ERC20_ABI = [
+  "event Transfer(address indexed from, address indexed to, uint256 value)",
   "function transfer(address to, uint amount) returns (bool)",
   "function decimals() view returns (uint8)",
   "function balanceOf(address owner) view returns (uint)",
 ];
 
-// API: Create Wallet
+// Create Wallet
 app.post("/api/create", async (req, res) => {
   try {
     const wallet = ethers.Wallet.createRandom();
@@ -52,7 +65,7 @@ app.post("/api/create", async (req, res) => {
   }
 });
 
-// API: Fetch Wallet
+// Fetch Wallet
 app.get("/api/fetch/:name", async (req, res) => {
   try {
     const wallet = await Wallet.findOne({ name: req.params.name });
@@ -63,7 +76,7 @@ app.get("/api/fetch/:name", async (req, res) => {
   }
 });
 
-// API: Get Balances
+// Get Balances
 app.post("/api/balance", async (req, res) => {
   try {
     const { address } = req.body;
@@ -87,28 +100,45 @@ app.post("/api/balance", async (req, res) => {
   }
 });
 
-// ✅ FIXED: Send Tokens
+// Send BNB, USDT, or USDC and save hash immediately
 app.post("/api/send", async (req, res) => {
   try {
     const { privateKey, to, amount, token } = req.body;
     const wallet = new ethers.Wallet(privateKey, provider);
+    let tx, value;
 
     if (token === "bnb") {
-      const tx = await wallet.sendTransaction({
+      value = ethers.utils.parseEther(amount);
+      tx = await wallet.sendTransaction({ to, value });
+
+      await new VerifiedTx({
+        txHash: tx.hash,
+        from: wallet.address,
         to,
-        value: ethers.utils.parseEther(amount),
-      });
-      await tx.wait();
+        value: amount,
+        token: "bnb",
+        status: "Pending"
+      }).save();
+
       return res.json({ txHash: tx.hash });
     }
 
     const tokenAddress = token === "usdt" ? USDT_ADDRESS : USDC_ADDRESS;
     const contract = new ethers.Contract(tokenAddress, ERC20_ABI, wallet);
-    const decimals = await contract.decimals(); // ✅ Use actual token decimals
-    const value = ethers.utils.parseUnits(amount, decimals);
+    const decimals = await contract.decimals();
+    value = ethers.utils.parseUnits(amount, decimals);
 
-    const tx = await contract.transfer(to, value);
-    await tx.wait();
+    tx = await contract.transfer(to, value);
+
+    await new VerifiedTx({
+      txHash: tx.hash,
+      from: wallet.address,
+      to,
+      value: amount,
+      token,
+      status: "Pending"
+    }).save();
+
     res.json({ txHash: tx.hash });
   } catch (err) {
     console.error("❌ Send Token Error:", err.message);
@@ -116,14 +146,19 @@ app.post("/api/send", async (req, res) => {
   }
 });
 
-// API: Verify Transaction
-
-
+// Verify transaction manually
 app.post("/api/verify", async (req, res) => {
   try {
     const { txHash } = req.body;
-    const tx = await provider.getTransaction(txHash);
-    if (!tx) return res.status(404).json({ error: "Transaction not found" });
+
+    let tx = null;
+    for (let i = 0; i < 5; i++) {
+      tx = await provider.getTransaction(txHash);
+      if (tx) break;
+      await new Promise(r => setTimeout(r, 1000));
+    }
+
+    if (!tx) return res.status(404).json({ error: "Transaction not found after retries" });
 
     const receipt = await provider.getTransactionReceipt(txHash);
     let token = "bnb";
@@ -131,8 +166,6 @@ app.post("/api/verify", async (req, res) => {
 
     if (tx.data && tx.data.startsWith("0xa9059cbb")) {
       const tokenAddress = tx.to.toLowerCase();
-
-      // Create contract instance to get decimals dynamically
       const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
       const decimals = await tokenContract.decimals();
 
@@ -147,17 +180,105 @@ app.post("/api/verify", async (req, res) => {
       else token = "erc20";
     }
 
-    res.json({
-      from: tx.from,
-      to: tx.to,
-      value,
-      token,
-      status: receipt.status === 1 ? "Success" : "Failed",
-    });
+    const status = receipt.status === 1 ? "Success" : "Failed";
+
+    await VerifiedTx.findOneAndUpdate(
+      { txHash },
+      {
+        from: tx.from,
+        to: tx.to,
+        value,
+        token,
+        status,
+      },
+      { upsert: true, new: true }
+    );
+
+    console.log("✅ Verified & updated:", txHash);
+    res.json({ from: tx.from, to: tx.to, value, token, status });
   } catch (err) {
-    console.error(err);
+    console.error("❌ Verification Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
+
+// Fetch history
+app.get("/api/history/:address", async (req, res) => {
+  try {
+    const { address } = req.params;
+    const transactions = await VerifiedTx.find({
+      $or: [{ from: address }, { to: address }]
+    }).sort({ createdAt: -1 });
+    res.json(transactions);
+  } catch (err) {
+    console.error("❌ History Fetch Error:", err.message);
+    res.status(500).json({ error: "Failed to fetch transaction history" });
+  }
+});
+
+// ======== AUTO LISTENER (for incoming/outgoing txs) ========
+async function startListeners() {
+  const wallets = await Wallet.find({});
+  const walletAddresses = wallets.map(w => w.address.toLowerCase());
+
+  const usdt = new ethers.Contract(USDT_ADDRESS, ERC20_ABI, provider);
+  const usdc = new ethers.Contract(USDC_ADDRESS, ERC20_ABI, provider);
+
+  async function handleTokenTransfer(tokenName, decimals, from, to, value, event) {
+    if (walletAddresses.includes(to.toLowerCase()) || walletAddresses.includes(from.toLowerCase())) {
+      const amount = ethers.utils.formatUnits(value, decimals);
+      const receipt = await event.getTransactionReceipt();
+      const status = receipt.status === 1 ? "Success" : "Failed";
+      const exists = await VerifiedTx.findOne({ txHash: event.transactionHash });
+      if (!exists) {
+        await new VerifiedTx({
+          txHash: event.transactionHash,
+          from,
+          to,
+          value: amount,
+          token: tokenName,
+          status
+        }).save();
+        console.log(`📥 Auto saved ${tokenName} tx: ${event.transactionHash}`);
+      }
+    }
+  }
+
+  const usdtDecimals = await usdt.decimals();
+  const usdcDecimals = await usdc.decimals();
+
+  usdt.on("Transfer", (from, to, value, event) =>
+    handleTokenTransfer("usdt", usdtDecimals, from, to, value, event)
+  );
+  usdc.on("Transfer", (from, to, value, event) =>
+    handleTokenTransfer("usdc", usdcDecimals, from, to, value, event)
+  );
+
+  // BNB transfers
+  provider.on("pending", async (txHash) => {
+    try {
+      const tx = await provider.getTransaction(txHash);
+      if (tx && tx.to && walletAddresses.includes(tx.to.toLowerCase())) {
+        const receipt = await provider.getTransactionReceipt(txHash);
+        if (!receipt) return;
+        const exists = await VerifiedTx.findOne({ txHash });
+        if (!exists) {
+          await new VerifiedTx({
+            txHash,
+            from: tx.from,
+            to: tx.to,
+            value: ethers.utils.formatEther(tx.value),
+            token: "bnb",
+            status: receipt.status === 1 ? "Success" : "Failed"
+          }).save();
+          console.log(`📥 Auto saved BNB tx: ${txHash}`);
+        }
+      }
+    } catch {}
+  });
+
+  console.log("🔄 Auto listeners started...");
+}
+startListeners();
 
 app.listen(5000, () => console.log("🚀 Server running on http://localhost:5000"));
