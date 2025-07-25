@@ -48,6 +48,8 @@ const ERC20_ABI = [
   "function balanceOf(address owner) view returns (uint)",
 ];
 
+// ======== ROUTES ========
+
 // Create Wallet
 app.post("/api/create", async (req, res) => {
   try {
@@ -100,33 +102,45 @@ app.post("/api/balance", async (req, res) => {
   }
 });
 
-// ====== FIXED SEND API (saves as "Pending" immediately) ======
+// Send BNB, USDT, or USDC and save hash immediately
 app.post("/api/send", async (req, res) => {
   try {
     const { privateKey, to, amount, token } = req.body;
     const wallet = new ethers.Wallet(privateKey, provider);
-    let tx;
+    let tx, value;
 
     if (token === "bnb") {
-      tx = await wallet.sendTransaction({ to, value: ethers.utils.parseEther(amount) });
-    } else {
-      const tokenAddress = token === "usdt" ? USDT_ADDRESS : USDC_ADDRESS;
-      const contract = new ethers.Contract(tokenAddress, ERC20_ABI, wallet);
-      const decimals = await contract.decimals();
-      tx = await contract.transfer(to, ethers.utils.parseUnits(amount, decimals));
+      value = ethers.utils.parseEther(amount);
+      tx = await wallet.sendTransaction({ to, value });
+
+      await new VerifiedTx({
+        txHash: tx.hash,
+        from: wallet.address,
+        to,
+        value: amount,
+        token: "bnb",
+        status: "Pending"
+      }).save();
+
+      return res.json({ txHash: tx.hash });
     }
-    
-    // Save immediately with a "Pending" status. DO NOT wait for confirmation.
+
+    const tokenAddress = token === "usdt" ? USDT_ADDRESS : USDC_ADDRESS;
+    const contract = new ethers.Contract(tokenAddress, ERC20_ABI, wallet);
+    const decimals = await contract.decimals();
+    value = ethers.utils.parseUnits(amount, decimals);
+
+    tx = await contract.transfer(to, value);
+
     await new VerifiedTx({
       txHash: tx.hash,
       from: wallet.address,
       to,
       value: amount,
       token,
-      status: "Pending" // Save as pending
+      status: "Pending"
     }).save();
 
-    console.log(`Transaction submitted as Pending: ${tx.hash}`);
     res.json({ txHash: tx.hash });
   } catch (err) {
     console.error("❌ Send Token Error:", err.message);
@@ -134,21 +148,40 @@ app.post("/api/send", async (req, res) => {
   }
 });
 
-// Verify transaction manually (logic remains the same)
+// Cancel Pending Transaction (manual user action)
+app.post("/api/cancel", async (req, res) => {
+  try {
+    const { txHash } = req.body;
+    const tx = await VerifiedTx.findOne({ txHash });
+    if (!tx) return res.status(404).json({ error: "Transaction not found" });
+    if (tx.status !== "Pending")
+      return res.status(400).json({ error: "Only pending transactions can be cancelled" });
+
+    tx.status = "Cancelled";
+    await tx.save();
+    console.log(`❌ Transaction cancelled: ${txHash}`);
+    res.json({ message: "Transaction cancelled successfully", txHash });
+  } catch (err) {
+    console.error("❌ Cancel Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Verify transaction manually
 app.post("/api/verify", async (req, res) => {
   try {
     const { txHash } = req.body;
 
-    // Check for receipt, if null, it's still pending
-    const receipt = await provider.getTransactionReceipt(txHash);
-    if (receipt === null) {
-      // Find the pending transaction in our DB to return it
-      const pendingTx = await VerifiedTx.findOne({ txHash });
-      if (pendingTx) return res.json(pendingTx);
-      return res.status(200).json({ status: "Pending" });
+    let tx = null;
+    for (let i = 0; i < 5; i++) {
+      tx = await provider.getTransaction(txHash);
+      if (tx) break;
+      await new Promise(r => setTimeout(r, 1000));
     }
-    
-    const tx = await provider.getTransaction(txHash);
+
+    if (!tx) return res.status(404).json({ error: "Transaction not found after retries" });
+
+    const receipt = await provider.getTransactionReceipt(txHash);
     let token = "bnb";
     let value = tx.value ? ethers.utils.formatEther(tx.value) : "0";
 
@@ -156,8 +189,9 @@ app.post("/api/verify", async (req, res) => {
       const tokenAddress = tx.to.toLowerCase();
       const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
       const decimals = await tokenContract.decimals();
-      const decoded = ethers.utils.defaultAbiCoder.decode(["address", "uint256"], `0x${tx.data.slice(10)}`);
+      const decoded = ethers.utils.defaultAbiCoder.decode(["address", "uint256"], "0x" + tx.data.slice(10));
       value = ethers.utils.formatUnits(decoded[1], decimals);
+
       if (tokenAddress === USDT_ADDRESS.toLowerCase()) token = "usdt";
       else if (tokenAddress === USDC_ADDRESS.toLowerCase()) token = "usdc";
       else token = "erc20";
@@ -165,22 +199,21 @@ app.post("/api/verify", async (req, res) => {
 
     const status = receipt.status === 1 ? "Success" : "Failed";
 
-    const updatedTx = await VerifiedTx.findOneAndUpdate(
+    await VerifiedTx.findOneAndUpdate(
       { txHash },
       { from: tx.from, to: tx.to, value, token, status },
       { upsert: true, new: true }
     );
 
     console.log("✅ Verified & updated:", txHash);
-    res.json(updatedTx);
+    res.json({ from: tx.from, to: tx.to, value, token, status });
   } catch (err) {
     console.error("❌ Verification Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-
-// Fetch history (logic remains the same)
+// Fetch history
 app.get("/api/history/:address", async (req, res) => {
   try {
     const { address } = req.params;
@@ -194,7 +227,68 @@ app.get("/api/history/:address", async (req, res) => {
   }
 });
 
-// AUTO LISTENER (logic remains the same)
-// ... (Your auto-listener code is unchanged)
+// ======== AUTO LISTENER (for incoming/outgoing txs) ========
+async function startListeners() {
+  const wallets = await Wallet.find({});
+  const walletAddresses = wallets.map(w => w.address.toLowerCase());
+
+  const usdt = new ethers.Contract(USDT_ADDRESS, ERC20_ABI, provider);
+  const usdc = new ethers.Contract(USDC_ADDRESS, ERC20_ABI, provider);
+
+  async function handleTokenTransfer(tokenName, decimals, from, to, value, event) {
+    if (walletAddresses.includes(to.toLowerCase()) || walletAddresses.includes(from.toLowerCase())) {
+      const amount = ethers.utils.formatUnits(value, decimals);
+      const receipt = await event.getTransactionReceipt();
+      const status = receipt.status === 1 ? "Success" : "Failed";
+      const exists = await VerifiedTx.findOne({ txHash: event.transactionHash });
+      if (!exists) {
+        await new VerifiedTx({
+          txHash: event.transactionHash,
+          from,
+          to,
+          value: amount,
+          token: tokenName,
+          status
+        }).save();
+        console.log(`📥 Auto saved ${tokenName} tx: ${event.transactionHash}`);
+      }
+    }
+  }
+
+  const usdtDecimals = await usdt.decimals();
+  const usdcDecimals = await usdc.decimals();
+
+  usdt.on("Transfer", (from, to, value, event) =>
+    handleTokenTransfer("usdt", usdtDecimals, from, to, value, event)
+  );
+  usdc.on("Transfer", (from, to, value, event) =>
+    handleTokenTransfer("usdc", usdcDecimals, from, to, value, event)
+  );
+
+  provider.on("pending", async (txHash) => {
+    try {
+      const tx = await provider.getTransaction(txHash);
+      if (tx && tx.to && walletAddresses.includes(tx.to.toLowerCase())) {
+        const receipt = await provider.getTransactionReceipt(txHash);
+        if (!receipt) return;
+        const exists = await VerifiedTx.findOne({ txHash });
+        if (!exists) {
+          await new VerifiedTx({
+            txHash,
+            from: tx.from,
+            to: tx.to,
+            value: ethers.utils.formatEther(tx.value),
+            token: "bnb",
+            status: receipt.status === 1 ? "Success" : "Failed"
+          }).save();
+          console.log(`📥 Auto saved BNB tx: ${txHash}`);
+        }
+      }
+    } catch {}
+  });
+
+  console.log("🔄 Auto listeners started...");
+}
+startListeners();
 
 app.listen(5000, () => console.log("🚀 Server running on http://localhost:5000"));
