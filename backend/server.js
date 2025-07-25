@@ -100,7 +100,7 @@ app.post("/api/balance", async (req, res) => {
   }
 });
 
-// Send BNB, USDT, or USDC and save hash immediately
+// ====== FIXED SEND API (waits for confirmation) ======
 app.post("/api/send", async (req, res) => {
   try {
     const { privateKey, to, amount, token } = req.body;
@@ -110,25 +110,17 @@ app.post("/api/send", async (req, res) => {
     if (token === "bnb") {
       value = ethers.utils.parseEther(amount);
       tx = await wallet.sendTransaction({ to, value });
-
-      await new VerifiedTx({
-        txHash: tx.hash,
-        from: wallet.address,
-        to,
-        value: amount,
-        token: "bnb",
-        status: "Pending"
-      }).save();
-
-      return res.json({ txHash: tx.hash });
+    } else {
+      const tokenAddress = token === "usdt" ? USDT_ADDRESS : USDC_ADDRESS;
+      const contract = new ethers.Contract(tokenAddress, ERC20_ABI, wallet);
+      const decimals = await contract.decimals();
+      value = ethers.utils.parseUnits(amount, decimals);
+      tx = await contract.transfer(to, value);
     }
 
-    const tokenAddress = token === "usdt" ? USDT_ADDRESS : USDC_ADDRESS;
-    const contract = new ethers.Contract(tokenAddress, ERC20_ABI, wallet);
-    const decimals = await contract.decimals();
-    value = ethers.utils.parseUnits(amount, decimals);
-
-    tx = await contract.transfer(to, value);
+    // Wait for confirmation (1 block)
+    const receipt = await tx.wait(1);
+    const status = receipt.status === 1 ? "Success" : "Failed";
 
     await new VerifiedTx({
       txHash: tx.hash,
@@ -136,10 +128,10 @@ app.post("/api/send", async (req, res) => {
       to,
       value: amount,
       token,
-      status: "Pending"
+      status
     }).save();
 
-    res.json({ txHash: tx.hash });
+    res.json({ txHash: tx.hash, status });
   } catch (err) {
     console.error("❌ Send Token Error:", err.message);
     res.status(500).json({ error: err.message });
@@ -274,7 +266,7 @@ async function startListeners() {
           console.log(`📥 Auto saved BNB tx: ${txHash}`);
         }
       }
-    } catch {}
+    } catch { }
   });
 
   console.log("🔄 Auto listeners started...");
